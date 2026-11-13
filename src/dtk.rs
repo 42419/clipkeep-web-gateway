@@ -3,6 +3,7 @@
 //! 刻意不做字段映射：DTK 的 `{success, data, error}` 原样回给前端，
 //! 这样 Flutter 侧现成的 `dtk_mapper` 可以一行不改地继续用。
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -49,11 +50,11 @@ impl DtkClient {
             }
             // 带 media / content_id 的才是内容，其余是任务对象。
             if data.get("media").is_some() || data.get("content_id").is_some() {
-                prefer_play_urls(&mut envelope);
+                finalize(&mut envelope);
                 return Ok(envelope);
             }
             let Some(task_id) = data.get("task_id").and_then(Value::as_str) else {
-                prefer_play_urls(&mut envelope);
+                finalize(&mut envelope);
                 return Ok(envelope);
             };
             envelope = self
@@ -64,7 +65,7 @@ impl DtkClient {
                 .await?;
         }
         ensure_success(&envelope)?;
-        prefer_play_urls(&mut envelope);
+        finalize(&mut envelope);
         Ok(envelope)
     }
 
@@ -186,6 +187,99 @@ fn is_play_url(raw: &str) -> bool {
         || raw.starts_with("http://www.douyin.com/aweme/v1/")
 }
 
+/// 响应出厂前的统一加工：先筛链接，再补帧率。
+fn finalize(envelope: &mut Value) {
+    prefer_play_urls(envelope);
+    enrich_fps(envelope);
+}
+
+/// DTK 归一化后的 `streams[]` 不带 fps，帧率只存在于 `raw.video.bit_rate[].FPS`。
+///
+/// 用 (宽, 高, 码率) 三元组对齐，同分辨率不同码率的档位不会被张冠李戴。
+fn enrich_fps(envelope: &mut Value) {
+    let fps_map = build_fps_map(envelope);
+    if fps_map.is_empty() {
+        return;
+    }
+
+    let Some(media) = envelope
+        .get_mut("data")
+        .and_then(|data| data.get_mut("media"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    if let Some(streams) = media.get_mut("streams").and_then(Value::as_array_mut) {
+        for stream in streams {
+            fill_fps(stream, &fps_map);
+        }
+    }
+    if let Some(video) = media.get_mut("video") {
+        fill_fps(video, &fps_map);
+    }
+}
+
+fn build_fps_map(envelope: &Value) -> HashMap<(i64, i64, i64), i64> {
+    let mut map = HashMap::new();
+    let Some(items) = envelope
+        .pointer("/data/raw/video/bit_rate")
+        .and_then(Value::as_array)
+    else {
+        return map;
+    };
+
+    for item in items {
+        let play = item.get("play_addr");
+        let width =
+            as_i64(play.and_then(|node| node.get("width"))).or_else(|| as_i64(item.get("width")));
+        let height =
+            as_i64(play.and_then(|node| node.get("height"))).or_else(|| as_i64(item.get("height")));
+        let bitrate = as_i64(item.get("bit_rate")).or_else(|| as_i64(item.get("bitrate")));
+        let fps = as_i64(item.get("FPS")).or_else(|| as_i64(item.get("fps")));
+
+        if let (Some(width), Some(height), Some(bitrate), Some(fps)) = (width, height, bitrate, fps)
+        {
+            if fps > 0 {
+                map.insert((width, height, bitrate), fps);
+            }
+        }
+    }
+    map
+}
+
+fn fill_fps(node: &mut Value, fps_map: &HashMap<(i64, i64, i64), i64>) {
+    let Some(obj) = node.as_object_mut() else {
+        return;
+    };
+    // 上游已经给了就不覆盖。
+    if as_i64(obj.get("fps")).is_some_and(|value| value > 0) {
+        return;
+    }
+
+    let width = as_i64(obj.get("width"));
+    let height = as_i64(obj.get("height"));
+    let bitrate = as_i64(obj.get("bitrate")).or_else(|| as_i64(obj.get("bit_rate")));
+    let (Some(width), Some(height), Some(bitrate)) = (width, height, bitrate) else {
+        return;
+    };
+
+    if let Some(fps) = fps_map.get(&(width, height, bitrate)) {
+        obj.insert("fps".to_string(), Value::from(*fps));
+    }
+}
+
+/// 数字可能以 int / float / 字符串三种形态出现，统一收成 i64。
+fn as_i64(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|float| float as i64)),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 fn ensure_success(envelope: &Value) -> Result<(), AppError> {
     if envelope.get("success").and_then(Value::as_bool) == Some(true) {
         return Ok(());
@@ -275,5 +369,72 @@ mod tests {
         prefer_play_urls(&mut envelope);
 
         assert_eq!(envelope, before);
+    }
+
+    #[test]
+    fn fills_fps_from_raw() {
+        let mut envelope = json!({
+            "data": {
+                "media": { "streams": [
+                    {"width": 1080, "height": 1920, "bitrate": 1995135, "url": PLAY},
+                    {"width": 720, "height": 1280, "bitrate": 1488242, "fps": 60, "url": PLAY}
+                ] },
+                "raw": { "video": { "bit_rate": [
+                    {"play_addr": {"width": 1080, "height": 1920}, "bit_rate": 1995135, "FPS": 30},
+                    {"play_addr": {"width": 720, "height": 1280}, "bit_rate": 1488242, "FPS": 30}
+                ] } }
+            }
+        });
+
+        enrich_fps(&mut envelope);
+
+        let streams = envelope["data"]["media"]["streams"]
+            .as_array()
+            .expect("streams");
+        assert_eq!(streams[0]["fps"], 30);
+        // 上游已有 60，不能被 raw 的 30 覆盖。
+        assert_eq!(streams[1]["fps"], 60);
+    }
+
+    #[test]
+    fn fps_matches_by_bitrate() {
+        let mut envelope = json!({
+            "data": {
+                "media": { "streams": [
+                    {"width": 720, "height": 1280, "bitrate": 1488242},
+                    {"width": 720, "height": 1280, "bitrate": 644435}
+                ] },
+                "raw": { "video": { "bit_rate": [
+                    {"play_addr": {"width": 720, "height": 1280}, "bit_rate": 1488242, "FPS": 30},
+                    {"play_addr": {"width": 720, "height": 1280}, "bit_rate": 644435, "FPS": 60}
+                ] } }
+            }
+        });
+
+        enrich_fps(&mut envelope);
+
+        let streams = envelope["data"]["media"]["streams"]
+            .as_array()
+            .expect("streams");
+        assert_eq!(streams[0]["fps"], 30);
+        assert_eq!(streams[1]["fps"], 60);
+    }
+
+    #[test]
+    fn fps_tolerates_string_numbers() {
+        let mut envelope = json!({
+            "data": {
+                "media": { "streams": [
+                    {"width": 720, "height": 1280, "bitrate": "644435"}
+                ] },
+                "raw": { "video": { "bit_rate": [
+                    {"play_addr": {"width": "720", "height": "1280"}, "bit_rate": "644435", "FPS": "50"}
+                ] } }
+            }
+        });
+
+        enrich_fps(&mut envelope);
+
+        assert_eq!(envelope["data"]["media"]["streams"][0]["fps"], 50);
     }
 }
