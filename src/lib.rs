@@ -167,7 +167,8 @@ async fn require_session(
 // ---------- handlers ----------
 
 async fn healthz() -> Json<Value> {
-    Json(json!({ "ok": true }))
+    // 带版本号，方便 curl 一下就知道线上跑的是哪个构建。
+    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
 }
 
 #[derive(Debug, Deserialize)]

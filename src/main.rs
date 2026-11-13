@@ -3,7 +3,11 @@
 use std::net::SocketAddr;
 use std::process::ExitCode;
 
-use clipkeep_gateway::{build_router, config::Config, AppState};
+use clipkeep_gateway::{
+    build_router,
+    config::{Config, DeliveryMode},
+    AppState,
+};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -24,11 +28,6 @@ async fn main() -> ExitCode {
         }
     };
 
-    let bind = config.bind;
-    let static_dir = config.static_dir.clone();
-    let delivery = config.delivery;
-    let allowed = config.allowed_hosts.len();
-
     let state = match AppState::new(config) {
         Ok(state) => state,
         Err(error) => {
@@ -37,14 +36,8 @@ async fn main() -> ExitCode {
         }
     };
 
-    if !static_dir.is_dir() {
-        tracing::warn!(
-            dir = %static_dir.display(),
-            "静态目录不存在，/ 会返回 404；放入 flutter build web 产物即可"
-        );
-    }
-
-    let app = build_router(state);
+    let app = build_router(state.clone());
+    let bind = state.config.bind;
     let listener = match tokio::net::TcpListener::bind(bind).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -53,13 +46,7 @@ async fn main() -> ExitCode {
         }
     };
 
-    tracing::info!(
-        %bind,
-        static_dir = %static_dir.display(),
-        ?delivery,
-        allowed_hosts = allowed,
-        "clipkeep-gateway 已启动"
-    );
+    print_banner(&state.config);
 
     let serve = axum::serve(
         listener,
@@ -72,6 +59,45 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// 启动摘要用纯文本，不带时间戳，方便一眼确认版本和关键配置。
+fn print_banner(config: &Config) {
+    let version = env!("CARGO_PKG_VERSION");
+    let static_state = if config.static_dir.is_dir() {
+        "存在"
+    } else {
+        "不存在，访问 / 会 404"
+    };
+    let delivery = match config.delivery {
+        DeliveryMode::Proxy => "proxy —— 服务端中转，浏览器直接下载",
+        DeliveryMode::Redirect => "redirect —— 302 直连 CDN，浏览器会内联播放",
+    };
+    let hours = config.session_ttl.as_secs() / 3600;
+
+    println!("ClipKeep Gateway v{version}");
+    println!("  监听      {}", config.bind);
+    println!(
+        "  静态目录  {}（{static_state}）",
+        config.static_dir.display()
+    );
+    println!("  DTK       {}", config.dtk_base);
+    println!("  下载      {delivery}");
+    println!("  放行域名  {}", config.allowed_hosts.join(", "));
+    println!(
+        "  会话      {hours} 小时 · cookie Secure={} · 信任代理={}",
+        yes_no(config.cookie_secure),
+        yes_no(config.trust_proxy)
+    );
+    println!("  解析限流  {}/分钟/IP", config.parse_rate_per_min);
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "是"
+    } else {
+        "否"
+    }
 }
 
 async fn shutdown_signal() {
