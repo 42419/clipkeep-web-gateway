@@ -1,0 +1,24 @@
+[Unit]
+Description=ClipKeep web gateway
+Documentation=https://cnb.cool/yunfeiii/clipkeep-web-gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clipkeep
+Group=clipkeep
+WorkingDirectory=/opt/clipkeep-gateway
+EnvironmentFile=/opt/clipkeep-gateway/.env
+ExecStart=/opt/clipkeep-gateway/clipkeep-gateway
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/clipkeep-gateway
+
+[Install]
+WantedBy=multi-user.target
