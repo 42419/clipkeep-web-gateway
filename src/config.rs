@@ -22,9 +22,11 @@ pub enum DeliveryMode {
 
 impl DeliveryMode {
     fn parse(raw: &str) -> Self {
+        // 默认 proxy：redirect 会让浏览器把 video/mp4 内联播放，
+        // 对一个下载工具来说"点了不下载"是更严重的错误，宁可吃带宽。
         match raw.trim().to_ascii_lowercase().as_str() {
-            "proxy" => Self::Proxy,
-            _ => Self::Redirect,
+            "redirect" => Self::Redirect,
+            _ => Self::Proxy,
         }
     }
 }
@@ -163,4 +165,23 @@ fn flag(name: &str) -> bool {
     opt(name)
         .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_defaults_to_proxy() {
+        // 没配或写错都落到 proxy：宁可吃带宽，也不要"点了只播放"。
+        assert_eq!(DeliveryMode::parse(""), DeliveryMode::Proxy);
+        assert_eq!(DeliveryMode::parse("bogus"), DeliveryMode::Proxy);
+        assert_eq!(DeliveryMode::parse("PROXY"), DeliveryMode::Proxy);
+    }
+
+    #[test]
+    fn delivery_accepts_redirect() {
+        assert_eq!(DeliveryMode::parse("redirect"), DeliveryMode::Redirect);
+        assert_eq!(DeliveryMode::parse(" Redirect "), DeliveryMode::Redirect);
+    }
 }

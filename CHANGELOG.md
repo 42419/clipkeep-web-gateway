@@ -7,6 +7,18 @@
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-11-13
+
+### 变更
+
+- `DELIVERY` 默认值从 `redirect` 改为 `proxy`：浏览器对顶层导航到 `video/mp4` 一律内联播放，
+  redirect 模式下点下载只会开始播放，对下载工具是硬伤
+- README 部署章节改为自包含：`.env` 与 systemd unit 直接内联，不再假设已经 clone 仓库
+
+### 修复
+
+- 部署文档缺了获取 `.env.example` 的步骤，照抄命令会在 `cp .env.example .env` 处失败
+
 ## [v0.1.0] - 2026-11-13
 
 ### 新增
