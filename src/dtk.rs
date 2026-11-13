@@ -49,9 +49,11 @@ impl DtkClient {
             }
             // 带 media / content_id 的才是内容，其余是任务对象。
             if data.get("media").is_some() || data.get("content_id").is_some() {
+                prefer_play_urls(&mut envelope);
                 return Ok(envelope);
             }
             let Some(task_id) = data.get("task_id").and_then(Value::as_str) else {
+                prefer_play_urls(&mut envelope);
                 return Ok(envelope);
             };
             envelope = self
@@ -62,6 +64,7 @@ impl DtkClient {
                 .await?;
         }
         ensure_success(&envelope)?;
+        prefer_play_urls(&mut envelope);
         Ok(envelope)
     }
 
@@ -118,6 +121,71 @@ impl DtkClient {
     }
 }
 
+/// 只保留 `www.douyin.com/aweme/v1/*` 开头的播放接口地址。
+///
+/// `douyinvod.com` 直链实测 403（签名一次性或已过期），play 接口每次换一张新票。
+/// 某个流里一条 play 地址都没有时原样保留，避免把还能用的流删空。
+fn prefer_play_urls(envelope: &mut Value) {
+    let Some(data) = envelope.get_mut("data").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(media) = data.get_mut("media").and_then(Value::as_object_mut) else {
+        return;
+    };
+
+    if let Some(video) = media.get_mut("video") {
+        filter_node(video);
+    }
+    if let Some(streams) = media.get_mut("streams").and_then(Value::as_array_mut) {
+        for stream in streams {
+            filter_node(stream);
+        }
+    }
+}
+
+fn filter_node(node: &mut Value) {
+    let Some(obj) = node.as_object_mut() else {
+        return;
+    };
+
+    let mut plays: Vec<String> = Vec::new();
+    for key in ["url", "urls", "url_list"] {
+        match obj.get(key) {
+            Some(Value::String(raw)) => collect_play(raw, &mut plays),
+            Some(Value::Array(items)) => {
+                for item in items {
+                    if let Some(raw) = item.as_str() {
+                        collect_play(raw, &mut plays);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if plays.is_empty() {
+        return;
+    }
+
+    let all = Value::Array(plays.iter().cloned().map(Value::String).collect());
+    obj.insert("url".to_string(), Value::String(plays[0].clone()));
+    obj.insert("urls".to_string(), all.clone());
+    if obj.contains_key("url_list") {
+        obj.insert("url_list".to_string(), all);
+    }
+}
+
+fn collect_play(raw: &str, out: &mut Vec<String>) {
+    if is_play_url(raw) && !out.iter().any(|item| item == raw) {
+        out.push(raw.to_string());
+    }
+}
+
+fn is_play_url(raw: &str) -> bool {
+    raw.starts_with("https://www.douyin.com/aweme/v1/")
+        || raw.starts_with("http://www.douyin.com/aweme/v1/")
+}
+
 fn ensure_success(envelope: &Value) -> Result<(), AppError> {
     if envelope.get("success").and_then(Value::as_bool) == Some(true) {
         return Ok(());
@@ -139,4 +207,73 @@ fn error_message(body: &Value) -> String {
         }
     }
     "解析服务返回错误".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const PLAY: &str = "https://www.douyin.com/aweme/v1/play/?video_id=1&sign=2";
+
+    #[test]
+    fn keeps_only_play_urls() {
+        let mut envelope = json!({
+            "success": true,
+            "data": { "media": { "streams": [{
+                "url": "https://v11-weba.douyinvod.com/a",
+                "urls": [
+                    "https://v11-weba.douyinvod.com/a",
+                    "https://v26-web.douyinvod.com/b",
+                    PLAY
+                ]
+            }] } }
+        });
+
+        prefer_play_urls(&mut envelope);
+
+        let stream = &envelope["data"]["media"]["streams"][0];
+        assert_eq!(stream["url"], PLAY);
+        assert_eq!(stream["urls"].as_array().expect("urls").len(), 1);
+        assert_eq!(stream["urls"][0], PLAY);
+    }
+
+    #[test]
+    fn keeps_original_when_no_play() {
+        let mut envelope = json!({ "data": { "media": { "video": {
+            "url": "https://v11-weba.douyinvod.com/a",
+            "urls": ["https://v11-weba.douyinvod.com/a"]
+        } } } });
+
+        prefer_play_urls(&mut envelope);
+
+        let video = &envelope["data"]["media"]["video"];
+        assert_eq!(video["url"], "https://v11-weba.douyinvod.com/a");
+        assert_eq!(video["urls"].as_array().expect("urls").len(), 1);
+    }
+
+    #[test]
+    fn dedupes_same_play_url() {
+        let mut envelope = json!({ "data": { "media": { "video": {
+            "url": PLAY,
+            "urls": [PLAY, PLAY]
+        } } } });
+
+        prefer_play_urls(&mut envelope);
+
+        let urls = envelope["data"]["media"]["video"]["urls"]
+            .as_array()
+            .expect("urls");
+        assert_eq!(urls.len(), 1);
+    }
+
+    #[test]
+    fn leaves_non_media_payload_untouched() {
+        let mut envelope = json!({ "success": true, "data": { "task_id": "abc" } });
+        let before = envelope.clone();
+
+        prefer_play_urls(&mut envelope);
+
+        assert_eq!(envelope, before);
+    }
 }
