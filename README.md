@@ -82,6 +82,11 @@ sudo nano /opt/clipkeep-gateway/.env     # 填 DTK_API_KEY 与 SITE_TOKEN
 ```bash
 sudo useradd -r -s /usr/sbin/nologin clipkeep
 sudo chown -R clipkeep:clipkeep /opt/clipkeep-gateway
+# .env 交回 root：systemd 以 root 读取后注入环境变量，服务进程自己看不到文件内容。
+sudo chown root:root /opt/clipkeep-gateway/.env
+sudo chmod 600 /opt/clipkeep-gateway/.env
+sudo chmod 755 /opt/clipkeep-gateway /opt/clipkeep-gateway/static
+sudo chmod 755 /opt/clipkeep-gateway/clipkeep-gateway
 
 sudo tee /etc/systemd/system/clipkeep-gateway.service >/dev/null <<'EOF'
 [Unit]
@@ -117,9 +122,11 @@ sudo systemctl status clipkeep-gateway --no-pager
 ### 4. 验证
 
 ```bash
-curl -s http://127.0.0.1:8443/healthz                  # {"ok":true}
-journalctl -u clipkeep-gateway -n 20 | grep 已启动      # 应显示 delivery=Proxy
+curl -s http://127.0.0.1:8443/healthz          # {"ok":true,"version":"0.1.5"}
+journalctl -u clipkeep-gateway -n 12 --no-pager  # 首行应是 ClipKeep Gateway v0.1.5
 ```
+
+启动摘要里「静态目录」要显示「存在」，否则 `/` 会返回 404。
 
 外网访问需要安全组放行 8443。
 
@@ -128,8 +135,18 @@ journalctl -u clipkeep-gateway -n 20 | grep 已启动      # 应显示 delivery=
 ```bash
 sudo systemctl stop clipkeep-gateway
 sudo curl -L -o /opt/clipkeep-gateway/clipkeep-gateway <新版本地址>
-sudo chmod +x /opt/clipkeep-gateway/clipkeep-gateway
+# curl 产物属主是 root，umask 严格时是 600，只 chmod +x 会变成 700，
+# clipkeep 用户执行不了。必须先改属主。
+sudo chown clipkeep:clipkeep /opt/clipkeep-gateway/clipkeep-gateway
+sudo chmod 755 /opt/clipkeep-gateway/clipkeep-gateway
 sudo systemctl start clipkeep-gateway
+```
+
+验证：
+
+```bash
+journalctl -u clipkeep-gateway -n 5 --no-pager   # 首行应是 ClipKeep Gateway vX.Y.Z
+curl -s http://127.0.0.1:8443/healthz            # 应返回对应 version
 ```
 
 ### 想直接拿仓库里的文件
