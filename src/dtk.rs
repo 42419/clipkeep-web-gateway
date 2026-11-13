@@ -187,10 +187,48 @@ fn is_play_url(raw: &str) -> bool {
         || raw.starts_with("http://www.douyin.com/aweme/v1/")
 }
 
-/// 响应出厂前的统一加工：先筛链接，再补帧率。
+/// 响应出厂前的统一加工：先去水印，再筛链接，最后补帧率。
 fn finalize(envelope: &mut Value) {
+    drop_watermarked(envelope);
     prefer_play_urls(envelope);
     enrich_fps(envelope);
+}
+
+/// 剔除 `watermark != false` 的流。
+///
+/// 典型是 720×720、码率缺失、体积反而更大的烧录水印版。整条内容只有水印流时
+/// 原样保留，宁可给一条有水印的，也不要返回空列表。
+fn drop_watermarked(envelope: &mut Value) {
+    let Some(media) = envelope
+        .get_mut("data")
+        .and_then(|data| data.get_mut("media"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(streams) = media.get_mut("streams").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    let kept: Vec<Value> = streams
+        .iter()
+        .filter(|stream| !is_watermarked(stream))
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        return;
+    }
+    streams.clear();
+    streams.extend(kept);
+}
+
+fn is_watermarked(node: &Value) -> bool {
+    match node.get("watermark") {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::String(text)) => text.eq_ignore_ascii_case("true") || text.trim() == "1",
+        Some(Value::Number(number)) => number.as_i64() == Some(1),
+        _ => false,
+    }
 }
 
 /// DTK 归一化后的 `streams[]` 不带 fps，帧率只存在于 `raw.video.bit_rate[].FPS`。
@@ -369,6 +407,63 @@ mod tests {
         prefer_play_urls(&mut envelope);
 
         assert_eq!(envelope, before);
+    }
+
+    #[test]
+    fn drops_watermarked_stream() {
+        let mut envelope = json!({
+            "data": { "media": { "streams": [
+                {"width": 1080, "height": 1920, "bitrate": 1995135, "watermark": false},
+                {"width": 720, "height": 720, "watermark": true}
+            ] } }
+        });
+
+        drop_watermarked(&mut envelope);
+
+        let streams = envelope["data"]["media"]["streams"]
+            .as_array()
+            .expect("streams");
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0]["width"], 1080);
+    }
+
+    #[test]
+    fn keeps_streams_when_all_watermarked() {
+        let mut envelope = json!({
+            "data": { "media": { "streams": [
+                {"width": 720, "height": 720, "watermark": true}
+            ] } }
+        });
+
+        drop_watermarked(&mut envelope);
+
+        assert_eq!(
+            envelope["data"]["media"]["streams"]
+                .as_array()
+                .expect("streams")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn drops_watermarked_with_string_flag() {
+        let mut envelope = json!({
+            "data": { "media": { "streams": [
+                {"width": 1080, "height": 1920, "watermark": false},
+                {"width": 720, "height": 720, "watermark": "true"}
+            ] } }
+        });
+
+        drop_watermarked(&mut envelope);
+
+        assert_eq!(
+            envelope["data"]["media"]["streams"]
+                .as_array()
+                .expect("streams")
+                .len(),
+            1
+        );
     }
 
     #[test]
