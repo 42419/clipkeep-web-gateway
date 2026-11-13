@@ -128,7 +128,7 @@ journalctl -u clipkeep-gateway -n 12 --no-pager  # 首行应是 ClipKeep Gateway
 
 启动摘要里「静态目录」要显示「存在」，否则 `/` 会返回 404。
 
-外网访问需要安全组放行 8443。
+外网访问需要安全组放行 8443。若按下面的 nginx 方案部署，放行的是 nginx 的端口，网关本身只听 loopback。
 
 ### 5. 升级二进制
 
@@ -146,7 +146,8 @@ sudo systemctl start clipkeep-gateway
 
 ```bash
 journalctl -u clipkeep-gateway -n 5 --no-pager   # 首行应是 ClipKeep Gateway vX.Y.Z
-curl -s http://127.0.0.1:8443/healthz            # 应返回对应 version
+curl -s http://127.0.0.1:8080/healthz            # nginx 方案：网关在 8080
+curl -s http://127.0.0.1:8443/healthz            # 直接对外方案
 ```
 
 ### 想直接拿仓库里的文件
@@ -167,15 +168,72 @@ cargo run --release
 
 ## 两种部署拓扑
 
-```
-# A. 直接对外（HTTP，最省事）
-浏览器 → http://<IP>:8443 → clipkeep-gateway
+| 方案 | 适用 | 代价 |
+|---|---|---|
+| A. 直接对外 | 内网、临时验证 | 无 TLS，访问口令明文过网 |
+| B. nginx 反代 | 公网生产 | 多一层配置，但网关只听 loopback |
 
-# B. 放在 nginx 后面（HTTPS）
-浏览器 → https://<IP>:8443 (nginx, TLS) → 127.0.0.1:8080 → clipkeep-gateway
+**B 方案必需的三个环境变量**：
+
+```ini
+BIND=127.0.0.1:8080
+TRUST_PROXY=1
+COOKIE_SECURE=1
 ```
 
-方案 B 记得设 `BIND=127.0.0.1:8080`、`TRUST_PROXY=1`、`COOKIE_SECURE=1`。
+nginx 最小配置：
+
+```nginx
+server {
+    listen 8443 ssl;
+    server_name <IP>;
+
+    ssl_certificate     /etc/letsencrypt/live/<IP>/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/<IP>/privkey.pem;
+
+    root /opt/clipkeep-gateway/static;
+    index index.html;
+
+    # 探针不在 /api/ 下，必须精确匹配，否则被 try_files 兜底成 index.html
+    location = /healthz { proxy_pass http://127.0.0.1:8080; }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location /dl {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_buffering         off;   # 不关会把整段视频缓冲到磁盘
+        proxy_request_buffering off;
+        proxy_read_timeout      300s;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    }
+
+    location / { try_files $uri $uri/ /index.html; }
+}
+```
+
+`proxy_pass` 后面**不能带斜杠**：`http://127.0.0.1:8080/` 会把 `/api/parse` 改写成 `/parse`，直接 404。
+
+对方打到 TLS 端口上会出现 `400 Bad Request: The plain HTTP request was sent to HTTPS port`，加一条接管：
+
+```nginx
+error_page 497 =301 https://$host:$server_port$request_uri;
+```
+
+证书方面，Let's Encrypt 自 2026-01-15 起支持纯 IP 证书，不需要域名和备案，有效期 6 天：
+
+```bash
+certbot certonly --preferred-profile shortlived \
+  --webroot -w /var/www/acme --ip-address <IP> \
+  --deploy-hook "systemctl reload nginx"
+```
+
+`certbot renew` 也必须带 `--preferred-profile shortlived`，漏了会静默续期失败。
 
 ## 下载模式怎么选
 
