@@ -62,8 +62,12 @@ pub struct ClientIp(pub IpAddr);
 
 pub fn build_router(state: AppState) -> Router {
     let protected = Router::new()
+        // 同时挂 /api/v1/*：Flutter 端的 DtkClient 直连 DTK 时就是打这个前缀，
+        // 客户端代码不用为 web 单独改路径。
         .route("/api/parse", post(parse))
+        .route("/api/v1/parse", post(parse))
         .route("/api/tasks/{id}", get(task))
+        .route("/api/v1/tasks/{id}", get(task))
         .route("/dl", get(media::download))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

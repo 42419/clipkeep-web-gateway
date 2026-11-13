@@ -169,6 +169,28 @@ async fn parse_passes_envelope_through() {
 }
 
 #[tokio::test]
+async fn parse_v1_alias_works() {
+    // Flutter 端 DtkClient 直连 DTK 时打的是 /api/v1/parse，
+    // web 上经网关必须命中同一套逻辑，否则会落到静态回退返回 HTML。
+    let app = build_app().await;
+    let cookie = login(&app).await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/parse")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::COOKIE, &cookie)
+        .body(Body::from(
+            json!({ "url": "https://v.douyin.com/abc123/" }).to_string(),
+        ))
+        .expect("request");
+
+    let (status, _, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("content_id"));
+}
+
+#[tokio::test]
 async fn parse_rejects_non_douyin() {
     let app = build_app().await;
     let cookie = login(&app).await;
