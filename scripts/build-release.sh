@@ -7,6 +7,8 @@
 set -euo pipefail
 
 DIST="${DIST:-dist}"
+# CI 里可能把 target 目录指到别处（CNB 设了 CARGO_TARGET_DIR=/target）。
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 mkdir -p "$DIST"
 
 # 用户要的命名：clipkeep-gateway-<arch>-linux（musl 静态，README 里说明）
@@ -14,7 +16,7 @@ build_target() {
   local target="$1" arch="$2"
   echo "==> building $target"
   cargo build --release --locked --target "$target"
-  cp "target/$target/release/clipkeep-gateway" "$DIST/clipkeep-gateway-$arch-linux"
+  cp "$TARGET_DIR/$target/release/clipkeep-gateway" "$DIST/clipkeep-gateway-$arch-linux"
   chmod +x "$DIST/clipkeep-gateway-$arch-linux"
 }
 
