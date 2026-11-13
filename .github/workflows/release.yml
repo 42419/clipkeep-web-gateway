@@ -1,0 +1,120 @@
+name: Release
+
+# 只在推 v* tag 时构建发布；普通 push 不出包。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  quality:
+    name: fmt / clippy / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --all-targets
+
+  build:
+    name: build ${{ matrix.arch }}
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # musl 交叉工具链交给 cross，省掉手搓 aarch64-linux-musl-gcc。
+      - uses: taiki-e/install-action@cross
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: build
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/clipkeep-gateway" \
+             "dist/clipkeep-gateway-${{ matrix.arch }}-linux"
+          chmod +x "dist/clipkeep-gateway-${{ matrix.arch }}-linux"
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          bash scripts/extract_changelog.sh "$tag" CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md
+          echo "--- Release 说明（前 20 行）---"
+          head -20 RELEASE_NOTES.md
+
+      - name: checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ClipKeep Gateway ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/clipkeep-gateway-*
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true

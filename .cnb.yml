@@ -1,0 +1,100 @@
+# CNB 云原生构建：推 main 编译验证，推 v* tag 发布静态二进制。
+# 语法参考 https://docs.cnb.cool/zh/build/grammar.html
+
+main:
+  push:
+    - name: verify
+      runner:
+        cpus: 4
+      docker:
+        image: rust:1-slim
+      env:
+        CARGO_TERM_COLOR: always
+        CARGO_TARGET_DIR: /target
+      volumes:
+        # 依赖与增量产物都放宿主机，二次构建不用重编。
+        - /root/.cargo:copy-on-write
+        - /target:copy-on-write
+      stages:
+        - name: prepare
+          script: |
+            set -euo pipefail
+            apt-get update
+            apt-get install -y --no-install-recommends musl-tools curl ca-certificates
+            # slim 镜像只带 rustc/cargo，fmt 和 clippy 要显式装。
+            rustup component add rustfmt clippy
+            rustc -V
+            cargo -V
+
+        - name: fmt
+          script: cargo fmt --all -- --check
+
+        - name: clippy
+          script: cargo clippy --all-targets -- -D warnings
+
+        - name: test
+          script: cargo test --all-targets
+
+        - name: build
+          script: bash scripts/build-release.sh
+
+"v*":
+  tag_push:
+    - name: release
+      runner:
+        cpus: 4
+      docker:
+        image: rust:1-slim
+      env:
+        CARGO_TERM_COLOR: always
+        CARGO_TARGET_DIR: /target
+      volumes:
+        - /root/.cargo:copy-on-write
+        - /target:copy-on-write
+      stages:
+        - name: prepare
+          script: |
+            set -euo pipefail
+            apt-get update
+            apt-get install -y --no-install-recommends musl-tools curl ca-certificates
+            rustup component add rustfmt clippy
+            rustc -V
+            cargo -V
+
+        - name: fmt
+          script: cargo fmt --all -- --check
+
+        - name: clippy
+          script: cargo clippy --all-targets -- -D warnings
+
+        - name: test
+          script: cargo test --all-targets
+
+        - name: build
+          script: bash scripts/build-release.sh
+
+        - name: notes
+          script: |
+            set -euo pipefail
+            bash scripts/extract_changelog.sh "${CNB_BRANCH}" CHANGELOG.md > RELEASE_NOTES.md
+            test -s RELEASE_NOTES.md
+            echo "--- Release 说明（前 20 行）---"
+            head -20 RELEASE_NOTES.md
+
+        - name: create-release
+          type: git:release
+          options:
+            tag: ${CNB_BRANCH}
+            title: ClipKeep Gateway ${CNB_BRANCH}
+            descriptionFromFile: RELEASE_NOTES.md
+            latest: true
+            overlying: true
+
+        - name: upload
+          image: cnbcool/attachments
+          settings:
+            tag: ${CNB_BRANCH}
+            attachments:
+              - "./dist/clipkeep-gateway-x86_64-linux"
+              - "./dist/clipkeep-gateway-aarch64-linux"
+              - "./dist/SHA256SUMS"
