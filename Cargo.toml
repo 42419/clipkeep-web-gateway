@@ -1,6 +1,6 @@
 [package]
 name = "clipkeep-gateway"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.82"
 description = "ClipKeep 网页版网关：DTK 反代 + 静态托管 + 媒体下载"

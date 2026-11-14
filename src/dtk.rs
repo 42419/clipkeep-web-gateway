@@ -142,6 +142,14 @@ fn prefer_play_urls(envelope: &mut Value) {
             filter_node(stream);
         }
     }
+    // 实况图：每张图额外带一条短视频，同样只保留 play 地址，否则下载会 403。
+    if let Some(images) = media.get_mut("images").and_then(Value::as_array_mut) {
+        for image in images {
+            if let Some(video) = image.get_mut("video") {
+                filter_node(video);
+            }
+        }
+    }
 }
 
 fn filter_node(node: &mut Value) {
@@ -347,6 +355,28 @@ mod tests {
     use serde_json::json;
 
     const PLAY: &str = "https://www.douyin.com/aweme/v1/play/?video_id=1&sign=2";
+
+    #[test]
+    fn filters_live_photo_video() {
+        // 实况图挂在 media.images[].video 上，漏掉就会拿到 douyinvod 直链。
+        let mut envelope = json!({ "data": { "media": {
+            "images": [
+                {
+                    "url": "https://p3.douyinpic.com/a.jpg",
+                    "video": {
+                        "url": "https://v26-web.douyinvod.com/x",
+                        "urls": ["https://v26-web.douyinvod.com/x", PLAY]
+                    }
+                }
+            ]
+        } } });
+
+        prefer_play_urls(&mut envelope);
+
+        let video = &envelope["data"]["media"]["images"][0]["video"];
+        assert_eq!(video["url"], PLAY);
+        assert_eq!(video["urls"].as_array().expect("urls").len(), 1);
+    }
 
     #[test]
     fn keeps_only_play_urls() {
