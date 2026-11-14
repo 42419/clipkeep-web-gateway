@@ -7,6 +7,23 @@
 
 ## [Unreleased]
 
+## [v0.1.7] - 2026-11-14
+
+### 新增
+
+- `POST /api/bundle`：把多个文件下载到临时目录，压成一个 zip 流式返回。
+  浏览器会拦截连续触发的多个下载（用户只收到第一个），打包后只触发一次。
+  - 上限：50 个文件 / 单文件 200 MB / 整包 500 MB / 整体 180 秒
+  - 失败项跳过，包内附 `_skipped.txt` 写明原因
+  - 同时接受 JSON 与表单提交：浏览器无法用 XHR 触发带 `Content-Disposition` 的下载
+- `BUNDLE_TMP` 环境变量（默认 `./tmp`），临时目录按请求隔离，120 秒后清理，另有 10 分钟惰性兜底
+
+### 部署注意
+
+- systemd unit 需加 `ReadWritePaths=/opt/clipkeep-gateway/tmp`，否则 `ProtectSystem=strict` 会挡住写盘
+- 该目录属主设为 `clipkeep:clipkeep`
+- nginx 的 `location /api/bundle` 要 `proxy_read_timeout 180s` + `proxy_buffering off`
+
 ## [v0.1.6] - 2026-11-14
 
 ### 修复

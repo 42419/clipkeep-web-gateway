@@ -18,7 +18,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+# 二进制与静态目录只读；只有打包临时目录可写
 ReadOnlyPaths=/opt/clipkeep-gateway
+ReadWritePaths=/opt/clipkeep-gateway/tmp
 
 [Install]
 WantedBy=multi-user.target

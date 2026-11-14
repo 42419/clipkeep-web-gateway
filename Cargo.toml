@@ -1,6 +1,6 @@
 [package]
 name = "clipkeep-gateway"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.82"
 description = "ClipKeep 网页版网关：DTK 反代 + 静态托管 + 媒体下载"
@@ -9,7 +9,16 @@ publish = false
 
 [dependencies]
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "signal",
+  "net",
+  "fs",
+  "io-util",
+] }
+tokio-util = { version = "0.7", features = ["io"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = [
   "fs",

@@ -42,6 +42,8 @@ pub struct Config {
     pub sign_secret: String,
     pub allowed_hosts: Vec<String>,
     pub static_dir: PathBuf,
+    /// 打包下载的临时目录；systemd 下需要在 unit 里放行写权限。
+    pub bundle_tmp: PathBuf,
     pub delivery: DeliveryMode,
     /// 每个 IP 每分钟允许的解析次数；0 表示不限。
     pub parse_rate_per_min: u32,
@@ -130,6 +132,7 @@ impl Config {
             sign_secret,
             allowed_hosts,
             static_dir: PathBuf::from(opt("STATIC_DIR").unwrap_or_else(|| "./static".to_string())),
+            bundle_tmp: PathBuf::from(opt("BUNDLE_TMP").unwrap_or_else(|| "./tmp".to_string())),
             delivery: DeliveryMode::parse(&opt("DELIVERY").unwrap_or_default()),
             parse_rate_per_min,
             session_ttl: Duration::from_secs(ttl_hours.max(1) * 3600),

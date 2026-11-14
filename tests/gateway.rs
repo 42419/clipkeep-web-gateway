@@ -59,6 +59,8 @@ fn test_config(dtk_base: String) -> Config {
         sign_secret: "test-secret".into(),
         allowed_hosts: vec!["douyin.com".into()],
         static_dir: PathBuf::from(tempfile::tempdir().expect("tempdir").path()),
+        // 用固定路径：TempDir 在这里会被立即 drop，目录随即消失。
+        bundle_tmp: PathBuf::from("./tmp-test"),
         delivery: DeliveryMode::Redirect,
         parse_rate_per_min: 1000,
         session_ttl: Duration::from_secs(3600),
