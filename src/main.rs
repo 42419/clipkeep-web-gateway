@@ -38,6 +38,10 @@ async fn main() -> ExitCode {
 
     let app = build_router(state.clone());
     let bind = state.config.bind;
+
+    // 兜底清理：残留目录不会超过 10 分钟，进程异常退出也不会长期占盘。
+    spawn_bundle_janitor(state.config.bundle_tmp.clone());
+
     let listener = match tokio::net::TcpListener::bind(bind).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -59,6 +63,22 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// 每 10 分钟扫一次打包临时目录。
+///
+/// 正常情况下请求结束 120 秒就会删掉自己的目录；这个定时器只兜底
+/// 「进程在延迟清理生效前重启」这类情况。
+fn spawn_bundle_janitor(dir: std::path::PathBuf) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(600));
+        // interval 第一次 tick 立即返回，跳过它。
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            clipkeep_gateway::bundle::purge_stale(&dir);
+        }
+    });
 }
 
 /// 启动摘要用纯文本，不带时间戳，方便一眼确认版本和关键配置。

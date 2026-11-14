@@ -46,6 +46,9 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Config) -> Result<Self, reqwest::Error> {
+        // 重启后上一轮的打包目录已经没人会下载，直接清掉，避免磁盘越积越多。
+        bundle::purge_all(&config.bundle_tmp);
+
         let dtk = DtkClient::new(&config)?;
         let media = media::media_client();
         Ok(Self {

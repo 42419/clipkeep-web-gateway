@@ -88,7 +88,7 @@ pub async fn bundle(
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|error| AppError::Internal(format!("创建临时目录失败：{error}")))?;
-    cleanup_stale(&root);
+    purge_stale(&root);
 
     let dir = root.join(format!("bundle-{}-{}", std::process::id(), stamp()));
     tokio::fs::create_dir_all(&dir)
@@ -344,7 +344,7 @@ fn schedule_cleanup(dir: PathBuf) {
 }
 
 /// 惰性清理：每次请求顺手扫掉超时的残留目录，防止异常退出后越积越多。
-fn cleanup_stale(root: &FsPath) {
+pub fn purge_stale(root: &FsPath) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -362,6 +362,19 @@ fn cleanup_stale(root: &FsPath) {
             .map(|age| age.as_secs() > STALE_SECS)
             .unwrap_or(false)
         {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// 清空所有打包目录。进程重启后，上一轮的 token 已经没有任何下载会用到。
+pub fn purge_all(root: &FsPath) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
             let _ = std::fs::remove_dir_all(&path);
         }
     }
