@@ -5,15 +5,17 @@
 //!
 //! 代价是必须落盘：下载到临时目录 → 压缩 → 流式回传 → 延迟清理。
 
+use std::collections::HashMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Path as FsPath, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::Response;
-use serde::Deserialize;
+use axum::Json;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
@@ -52,11 +54,21 @@ pub struct BundleFile {
     pub n: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct BundleResult {
+    /// 取包凭证，形如 `bundle-1234-567890`。
+    pub token: String,
+    /// 成功打包的文件数。
+    pub saved: usize,
+    /// 失败的文件与原因，前端据此提示用户。
+    pub skipped: Vec<String>,
+}
+
 pub async fn bundle(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Response, AppError> {
+) -> Result<Json<BundleResult>, AppError> {
     let request = parse_request(&headers, &body)?;
     let files = request.files;
 
@@ -111,14 +123,45 @@ pub async fn bundle(
         .map_err(|error| AppError::Internal(format!("压缩任务异常：{error}")))?
         .map_err(|error| AppError::Internal(format!("压缩失败：{error}")))?;
 
+    // 不在这里直接回传 zip：前端需要先知道成功几个、失败几个。
+    // 打包结果放在临时目录，由 `/api/bundle/{token}` 取走。
+    let token = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    schedule_cleanup(dir);
+
+    Ok(Json(BundleResult {
+        token,
+        saved: files.len(),
+        skipped,
+    }))
+}
+
+/// 把打包好的 zip 交给浏览器；取过就删，避免临时目录长期堆积。
+pub async fn bundle_download(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, AppError> {
+    if !valid_token(&token) {
+        return Err(AppError::BadRequest("打包编号不合法".into()));
+    }
+
+    let dir = state.config.bundle_tmp.join(&token);
+    let zip_path = dir.join("bundle.zip");
+    if !zip_path.is_file() {
+        return Err(AppError::NotFound("打包结果已过期，请重新点击保存".into()));
+    }
+
     let handle = tokio::fs::File::open(&zip_path)
         .await
         .map_err(|error| AppError::Internal(format!("读取压缩包失败：{error}")))?;
 
-    // 流持有文件句柄，不能立刻删；先排一个延迟清理，外加下次请求的惰性清理兜底。
     schedule_cleanup(dir);
 
-    let name = sanitize_name(request.name.as_deref().unwrap_or("ClipKeep"));
+    let name = sanitize_name(params.get("n").map(String::as_str).unwrap_or("ClipKeep"));
     let disposition = content_disposition(&name);
     let stream = ReaderStream::new(handle);
 
@@ -176,7 +219,7 @@ fn check_url(state: &AppState, raw: &str) -> Result<(), AppError> {
 /// 逐个下载，失败的进跳过名单而不是整体失败。
 async fn collect(
     state: &AppState,
-    dir: &Path,
+    dir: &FsPath,
     files: &[BundleFile],
 ) -> (Vec<(PathBuf, String)>, Vec<String>) {
     let mut saved: Vec<(PathBuf, String)> = Vec::new();
@@ -211,7 +254,7 @@ async fn collect(
 
 async fn fetch_one(
     state: &AppState,
-    dir: &Path,
+    dir: &FsPath,
     url: &str,
     name: &str,
     used: u64,
@@ -263,7 +306,7 @@ async fn fetch_one(
 }
 
 fn write_zip(
-    target: &Path,
+    target: &FsPath,
     files: &[(PathBuf, String)],
     skipped: &[String],
 ) -> std::io::Result<()> {
@@ -301,7 +344,7 @@ fn schedule_cleanup(dir: PathBuf) {
 }
 
 /// 惰性清理：每次请求顺手扫掉超时的残留目录，防止异常退出后越积越多。
-fn cleanup_stale(root: &Path) {
+fn cleanup_stale(root: &FsPath) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -322,6 +365,15 @@ fn cleanup_stale(root: &Path) {
             let _ = std::fs::remove_dir_all(&path);
         }
     }
+}
+
+/// token 只可能是 `bundle-<pid>-<纳秒>`；收紧格式以杜绝路径穿越。
+fn valid_token(token: &str) -> bool {
+    token.starts_with("bundle-")
+        && token.len() < 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'-')
 }
 
 fn stamp() -> u128 {

@@ -70,6 +70,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/tasks/{id}", get(task))
         .route("/api/v1/tasks/{id}", get(task))
         .route("/api/bundle", post(bundle::bundle))
+        .route("/api/bundle/{token}", get(bundle::bundle_download))
         .route("/dl", get(media::download))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

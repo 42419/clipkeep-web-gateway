@@ -12,6 +12,8 @@ ClipKeep 网页版网关。把 DTK 的解析能力、Flutter web 的静态页面
 | `POST /api/parse` | 透传 DTK `/api/v1/parse`，注入 `X-API-Key`，`wait=20` 超时自动补轮询 |
 | `GET /api/tasks/{id}` | 透传任务查询 |
 | `GET /dl?u=<直链>&n=<文件名>` | 默认服务端流式中转（透传 Range）；`p=0` 时改为 302 跳 CDN |
+| `POST /api/bundle` | 把一批直链下载到临时目录压成 zip，返回 `{token, saved, skipped}` |
+| `GET /api/bundle/{token}?n=<包名>` | 取走打好的 zip；取过即删 |
 | `GET /healthz` | 存活检查 |
 | `GET /*` | Flutter web 静态产物，找不到回 `index.html` |
 
@@ -61,6 +63,8 @@ DTK_API_KEY=
 SITE_TOKEN=
 # Flutter web 产物目录
 STATIC_DIR=./static
+# 打包下载的临时目录，需要可写（systemd 下配合 ReadWritePaths）
+BUNDLE_TMP=./tmp
 # proxy = 服务端中转（能下载、文件名可控）；redirect = 302 直连 CDN（会被浏览器内联播放）
 DELIVERY=proxy
 # 每个 IP 每分钟允许的解析次数，0 = 不限
@@ -86,6 +90,10 @@ sudo chown -R clipkeep:clipkeep /opt/clipkeep-gateway
 sudo chown root:root /opt/clipkeep-gateway/.env
 sudo chmod 600 /opt/clipkeep-gateway/.env
 sudo chmod 755 /opt/clipkeep-gateway /opt/clipkeep-gateway/static
+# 打包下载的临时目录，服务进程要能写
+sudo mkdir -p /opt/clipkeep-gateway/tmp
+sudo chown clipkeep:clipkeep /opt/clipkeep-gateway/tmp
+sudo chmod 755 /opt/clipkeep-gateway/tmp
 sudo chmod 755 /opt/clipkeep-gateway/clipkeep-gateway
 
 sudo tee /etc/systemd/system/clipkeep-gateway.service >/dev/null <<'EOF'
@@ -108,6 +116,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+# 二进制与静态目录只读；只有打包临时目录可写
+ReadOnlyPaths=/opt/clipkeep-gateway
+ReadWritePaths=/opt/clipkeep-gateway/tmp
 ReadOnlyPaths=/opt/clipkeep-gateway
 
 [Install]

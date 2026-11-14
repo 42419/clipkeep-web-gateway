@@ -7,6 +7,20 @@
 
 ## [Unreleased]
 
+## [v0.1.8] - 2026-11-14
+
+### 变更
+
+- `/api/bundle` 改为两段式：POST 只负责打包并返回 `{token, saved, skipped}`，
+  另用 `GET /api/bundle/{token}` 取 zip。
+  原先直接回传文件，前端拿不到状态码，500 被塞进隐藏 iframe，用户只看到「已打包」却没有文件
+- 前端据此提示失败项数量，包内 `_skipped.txt` 写明具体原因
+
+### 修复
+
+- README 补上 `BUNDLE_TMP`、`ReadWritePaths` 与临时目录的创建步骤：
+  `ProtectSystem=strict` 下不显式放行会报 `Read-only file system`
+
 ## [v0.1.7] - 2026-11-14
 
 ### 新增
