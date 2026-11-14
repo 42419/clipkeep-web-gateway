@@ -367,13 +367,16 @@ fn cleanup_stale(root: &FsPath) {
     }
 }
 
-/// token 只可能是 `bundle-<pid>-<纳秒>`；收紧格式以杜绝路径穿越。
+/// token 形如 `bundle-<pid>-<纳秒>`；只校验前缀之后的部分，
+/// 前缀里的字母不能被数字规则误伤。
 fn valid_token(token: &str) -> bool {
-    token.starts_with("bundle-")
-        && token.len() < 64
-        && token
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'-')
+    token.strip_prefix("bundle-").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest.len() < 48
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'-')
+    })
 }
 
 fn stamp() -> u128 {
@@ -432,4 +435,32 @@ fn content_disposition(name: &str) -> String {
     let encoded: String =
         url::form_urlencoded::byte_serialize(format!("{name}.zip").as_bytes()).collect();
     format!("attachment; filename=\"{ascii}.zip\"; filename*=UTF-8''{encoded}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_matches_generated_format() {
+        // 前缀里的字母不能被「只允许数字和连字符」的规则误伤。
+        assert!(valid_token("bundle-2067650-1794634123775325246"));
+        assert!(valid_token("bundle-1-2"));
+    }
+
+    #[test]
+    fn token_rejects_traversal_and_noise() {
+        assert!(!valid_token("bundle-"));
+        assert!(!valid_token("bundle"));
+        assert!(!valid_token("bundle-1-2/../etc"));
+        assert!(!valid_token("../etc/passwd"));
+        assert!(!valid_token("bundle-12a-3"));
+    }
+
+    #[test]
+    fn sanitize_strips_separators() {
+        assert_eq!(sanitize_name("a/b\\c:d"), "a_b_c_d");
+        assert_eq!(sanitize_name("  ..  "), "clipkeep");
+        assert_eq!(sanitize_name("a\nb"), "a_b");
+    }
 }
