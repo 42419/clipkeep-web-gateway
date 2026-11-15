@@ -4,6 +4,7 @@
 //!
 //! 另有 `/img`：给网页端显示封面、头像用的同源图片中转，见 [`image`]。
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -94,10 +95,8 @@ pub async fn image(
         return Err(AppError::BadRequest("不支持的图片域名".into()));
     }
 
-    let mut upstream = state
-        .media
+    let mut upstream = image_client()
         .get(target.as_str())
-        .timeout(IMAGE_TIMEOUT)
         .header(header::USER_AGENT, crate::USER_AGENT)
         .header(header::REFERER, REFERER)
         .header(header::ACCEPT, "image/*,*/*;q=0.8")
@@ -105,6 +104,14 @@ pub async fn image(
         .await?;
 
     let status = upstream.status();
+    if status.is_redirection() {
+        // 客户端禁了自动跟随（见 image_client），这里显式拒绝：
+        // 跟随的话 302 的目标不受 host_allowed 约束，等于开了个内网探针。
+        return Err(AppError::Upstream(format!(
+            "图片地址要求跳转（HTTP {}），已拒绝",
+            status.as_u16()
+        )));
+    }
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         return Err(AppError::Upstream("图片链接已失效，请重新解析".into()));
     }
@@ -331,6 +338,24 @@ pub fn media_client() -> reqwest::Client {
         .pool_max_idle_per_host(8)
         .build()
         .expect("reqwest client 构建失败")
+}
+
+/// `/img` 专用客户端：**不跟随重定向**。
+///
+/// `/dl` 的转发依赖跟随 CDN 的 302，所以共享 client 保持默认策略；图片没有这个需求，
+/// 而跟随重定向会绕过 `host_allowed` —— 上游只要 302 到内网地址，服务端就会照着去拉，
+/// 攻击者可以通过响应差异探测内网端口。这里建成独立 client，等待首个请求时才初始化。
+fn image_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(IMAGE_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("image client 构建失败")
+    })
 }
 
 #[cfg(test)]
