@@ -12,6 +12,7 @@ ClipKeep 网页版网关。把 DTK 的解析能力、Flutter web 的静态页面
 | `POST /api/parse` | 透传 DTK `/api/v1/parse`，注入 `X-API-Key`，`wait=20` 超时自动补轮询 |
 | `GET /api/tasks/{id}` | 透传任务查询 |
 | `GET /dl?u=<直链>&n=<文件名>` | 默认服务端流式中转（透传 Range）；`p=0` 时改为 302 跳 CDN |
+| `GET /img?u=<图片直链>` | 同源图片中转，网页端显示封面、头像用；内联返回，上限 8 MB，不跟随重定向 |
 | `POST /api/bundle` | 把一批直链下载到临时目录压成 zip，返回 `{token, saved, skipped}` |
 | `GET /api/bundle/{token}?n=<包名>` | 取走打好的 zip；取过即删 |
 | `GET /healthz` | 存活检查 |
@@ -224,11 +225,28 @@ server {
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     }
 
+    # 网页端封面、头像的同源中转。图片很小，保持默认缓冲即可。
+    location /img {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    }
+
     location / { try_files $uri $uri/ /index.html; }
 }
 ```
 
 `proxy_pass` 后面**不能带斜杠**：`http://127.0.0.1:8080/` 会把 `/api/parse` 改写成 `/parse`，直接 404。
+
+**网关新增任何路由，都要同步在 nginx 里加一条 `location`。** 没加的路径会落到最后的
+`location /`，被 `try_files` 兜底成 `index.html`，表现为「请求返回了首页」而不是 404。
+典型症状：升级到 v0.1.11 后网页端封面、头像全是占位图，直接打开 `/img?u=...` 看到的是首页，
+原因就是少了上面的 `location /img`。排查时先 `curl -s https://<IP>:8443/healthz`
+确认版本，再直接访问目标路径，看返回的是网关的 JSON 还是 `index.html`。
+
+监听的是 8443 而不是 443：手动输入 `https://<IP>/...` 不带端口会走 443，没有服务在听，
+表现为 `ERR_TIMED_OUT`。测试链接要写成 `https://<IP>:8443/...`。
 
 对方打到 TLS 端口上会出现 `400 Bad Request: The plain HTTP request was sent to HTTPS port`，加一条接管：
 
@@ -275,8 +293,10 @@ DTK 返回的每条流有三条 URL：两条 `douyinvod.com` 直链、一条 `ww
 ## 安全边界
 
 - `X-API-Key` 永不下发前端，只存在于网关进程内存
-- `/dl` 只放行 `ALLOWED_HOSTS` 里的域名，防止变成开放代理
-- `/dl` 与 `/api/parse` 共用会话 cookie，链接本身不可分享（要分享得另做签名 URL）
+- `/dl` 与 `/img` 只放行 `ALLOWED_HOSTS` 里的域名，防止变成开放代理
+- `/img` 不跟随重定向：跟随的话 302 的目标不受白名单约束，上游跳到内网地址服务端就会照着去拉
+- `/img` 只回图片：上游类型不是图片、文件头也认不出时直接报错，不放行 HTML 防盗链页；单张上限 8 MB
+- `/dl`、`/img` 与 `/api/parse` 共用会话 cookie，链接本身不可分享（要分享得另做签名 URL）
 - 解析接口按 IP 限流（`PARSE_RATE_PER_MIN`）
 - 会话 cookie 是 HMAC 签名 + 过期时间，无需服务端状态
 
