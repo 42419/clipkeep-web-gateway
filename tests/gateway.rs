@@ -262,6 +262,130 @@ async fn download_requires_session() {
 }
 
 #[tokio::test]
+async fn image_rejects_foreign_host() {
+    let app = build_app().await;
+    let cookie = login(&app).await;
+
+    let request = Request::builder()
+        .uri("/img?u=https%3A%2F%2Fevil.example%2Fa.jpg")
+        .header(header::COOKIE, &cookie)
+        .body(Body::empty())
+        .expect("request");
+
+    let (status, _, body) = call(&app, request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("域名"));
+}
+
+#[tokio::test]
+async fn image_requires_session() {
+    let app = build_app().await;
+    let request = Request::builder()
+        .uri("/img?u=https%3A%2F%2Fp3.douyinpic.com%2Fa.jpg")
+        .body(Body::empty())
+        .expect("request");
+
+    let (status, _, _) = call(&app, request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+/// 假图床：`/ok.jpg` 回 octet-stream 的 JPEG 头（要靠文件头判断），
+/// `/deny.jpg` 回 403，`/page.jpg` 回 HTML（防盗链页面）。
+async fn spawn_stub_cdn() -> String {
+    let app = Router::new()
+        .route(
+            "/ok.jpg",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "application/octet-stream")],
+                    vec![0xFFu8, 0xD8, 0xFF, 0xE0, 1, 2, 3],
+                )
+            }),
+        )
+        .route("/deny.jpg", get(|| async { (StatusCode::FORBIDDEN, "no") }))
+        .route(
+            "/page.jpg",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/html")],
+                    "<html>blocked</html>",
+                )
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cdn");
+    let addr = listener.local_addr().expect("cdn addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+async fn build_app_with_cdn_allowed() -> Router {
+    let base = spawn_stub_dtk().await;
+    let mut config = test_config(base);
+    config.allowed_hosts = vec!["127.0.0.1".into()];
+    build_router(AppState::new(config).expect("state"))
+}
+
+#[tokio::test]
+async fn image_is_served_inline_with_sniffed_type() {
+    let cdn = spawn_stub_cdn().await;
+    let app = build_app_with_cdn_allowed().await;
+    let cookie = login(&app).await;
+
+    let uri = format!(
+        "/img?u={}",
+        format!("{cdn}/ok.jpg")
+            .replace(':', "%3A")
+            .replace('/', "%2F")
+    );
+    let request = Request::builder()
+        .uri(uri)
+        .header(header::COOKIE, &cookie)
+        .body(Body::empty())
+        .expect("request");
+
+    let (status, headers, _) = call(&app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("image/jpeg")
+    );
+    // 要内联显示，绝不能带 attachment。
+    assert!(headers.get(header::CONTENT_DISPOSITION).is_none());
+}
+
+#[tokio::test]
+async fn image_rejects_non_image_and_upstream_errors() {
+    let cdn = spawn_stub_cdn().await;
+    let app = build_app_with_cdn_allowed().await;
+    let cookie = login(&app).await;
+
+    for (path, expected) in [
+        ("page.jpg", StatusCode::BAD_GATEWAY),
+        ("deny.jpg", StatusCode::BAD_GATEWAY),
+    ] {
+        let uri = format!(
+            "/img?u={}",
+            format!("{cdn}/{path}")
+                .replace(':', "%3A")
+                .replace('/', "%2F")
+        );
+        let request = Request::builder()
+            .uri(uri)
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .expect("request");
+        let (status, _, _) = call(&app, request).await;
+        assert_eq!(status, expected, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn session_status_reflects_cookie() {
     let app = build_app().await;
 

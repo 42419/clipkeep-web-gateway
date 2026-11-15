@@ -1,6 +1,8 @@
 //! 媒体交付：默认 302 让浏览器直连 CDN，失败时用 `?p=1` 走流式转发。
 //!
 //! 两条路都透传 Range，浏览器才能边下边续。
+//!
+//! 另有 `/img`：给网页端显示封面、头像用的同源图片中转，见 [`image`]。
 
 use std::time::Duration;
 
@@ -16,6 +18,11 @@ use crate::error::AppError;
 use crate::AppState;
 
 const REFERER: &str = "https://www.douyin.com/";
+
+/// `/img` 单张图片的体积上限。封面、头像都是几十到几百 KB，超过这个值多半不是图片。
+const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+/// `/img` 的整体超时；图片很小，不需要像视频那样放宽到一小时。
+const IMAGE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Deserialize)]
 pub struct DownloadQuery {
@@ -56,6 +63,150 @@ pub async fn download(
     }
 
     proxy(&state, &target, &filename, &headers).await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImageQuery {
+    /// 图片直链，必须是白名单域名。
+    pub u: String,
+}
+
+/// 同源图片中转：网页端显示封面、头像用。
+///
+/// 为什么需要它：Flutter web 的 `Image.network` 只要带了 `headers` 就会改用 XHR 拉字节，
+/// 这条路要求 CDN 返回 CORS 头；而 `user-agent` / `referer` 是浏览器禁止脚本设置的请求头，
+/// 带了也会被丢掉，抖音图床的防盗链就没人处理。Edge、Android 浏览器碰巧能过，
+/// iOS Safari 上整批图片都加载失败。改走同源 `/img` 后，浏览器看到的是同源图片，
+/// Referer 由服务端补，不依赖 CDN 的 CORS 行为。
+///
+/// 与 `/dl` 的区别：不加 `Content-Disposition: attachment`，要让浏览器内联显示；
+/// 整张读进内存并限制体积，不做流式转发，也不转码。
+pub async fn image(
+    State(state): State<AppState>,
+    Query(query): Query<ImageQuery>,
+) -> Result<Response, AppError> {
+    let target = Url::parse(&query.u).map_err(|_| AppError::BadRequest("图片地址不合法".into()))?;
+    if !matches!(target.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest("只支持 http/https".into()));
+    }
+    let host = target.host_str().unwrap_or_default();
+    if !state.config.host_allowed(host) {
+        return Err(AppError::BadRequest("不支持的图片域名".into()));
+    }
+
+    let mut upstream = state
+        .media
+        .get(target.as_str())
+        .timeout(IMAGE_TIMEOUT)
+        .header(header::USER_AGENT, crate::USER_AGENT)
+        .header(header::REFERER, REFERER)
+        .header(header::ACCEPT, "image/*,*/*;q=0.8")
+        .send()
+        .await?;
+
+    let status = upstream.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return Err(AppError::Upstream("图片链接已失效，请重新解析".into()));
+    }
+    if !status.is_success() {
+        return Err(AppError::Upstream(format!(
+            "上游返回 HTTP {}",
+            status.as_u16()
+        )));
+    }
+    if upstream
+        .content_length()
+        .is_some_and(|len| len > MAX_IMAGE_BYTES as u64)
+    {
+        return Err(AppError::Upstream("图片过大".into()));
+    }
+
+    let declared = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    // 没有 Content-Length 时（分块传输）边读边数，超限立刻放弃。
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = upstream.chunk().await? {
+        if body.len() + chunk.len() > MAX_IMAGE_BYTES {
+            return Err(AppError::Upstream("图片过大".into()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let content_type = resolve_image_type(declared.as_deref(), &body)
+        .ok_or_else(|| AppError::Upstream("上游返回的不是图片".into()))?;
+
+    let mut response = Response::new(Body::from(body));
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    // 带登录态的接口，缓存只允许浏览器私有缓存；签名直链本身会过期，缓存时间别太长。
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=3600"),
+    );
+    Ok(response)
+}
+
+/// 决定回给浏览器的 Content-Type。
+///
+/// 全站开了 `nosniff`，类型不对浏览器就不渲染，所以不能照抄上游：
+/// CDN 偶尔会回 `application/octet-stream`，这时按文件头判断。
+/// 既不是图片声明、文件头也认不出来的，当作失败。
+fn resolve_image_type(declared: Option<&str>, body: &[u8]) -> Option<&'static str> {
+    const KNOWN: [&str; 6] = [
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/gif",
+        "image/avif",
+        "image/heic",
+    ];
+    if let Some(declared) = declared {
+        let essence = declared
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        // image/jpg 之类的非标准写法统一成 image/jpeg。
+        let essence = if essence == "image/jpg" {
+            "image/jpeg".to_string()
+        } else {
+            essence
+        };
+        if let Some(known) = KNOWN.iter().find(|item| **item == essence) {
+            return Some(known);
+        }
+    }
+    sniff_image_type(body)
+}
+
+fn sniff_image_type(body: &[u8]) -> Option<&'static str> {
+    if body.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if body.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Some("image/png");
+    }
+    if body.starts_with(b"GIF8") {
+        return Some("image/gif");
+    }
+    if body.len() >= 12 && &body[0..4] == b"RIFF" && &body[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if body.len() >= 12 && &body[4..8] == b"ftyp" {
+        return match &body[8..12] {
+            b"avif" | b"avis" => Some("image/avif"),
+            b"heic" | b"heix" | b"hevc" | b"heim" | b"heis" | b"mif1" | b"msf1" => {
+                Some("image/heic")
+            }
+            _ => None,
+        };
+    }
+    None
 }
 
 async fn proxy(
@@ -194,6 +345,54 @@ mod tests {
         assert_eq!(sanitize_filename(Some("../../etc/passwd")), "passwd.mp4");
         assert_eq!(sanitize_filename(Some("视频")), "视频.mp4");
         assert_eq!(sanitize_filename(Some("a.mp4")), "a.mp4");
+    }
+
+    #[test]
+    fn image_type_trusts_declared_image_types() {
+        assert_eq!(
+            resolve_image_type(Some("image/webp"), b"junk"),
+            Some("image/webp")
+        );
+        assert_eq!(
+            resolve_image_type(Some("image/JPEG; charset=binary"), b"junk"),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            resolve_image_type(Some("image/jpg"), b"junk"),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn image_type_falls_back_to_sniffing() {
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0];
+        assert_eq!(
+            resolve_image_type(Some("application/octet-stream"), &jpeg),
+            Some("image/jpeg")
+        );
+        assert_eq!(resolve_image_type(None, &jpeg), Some("image/jpeg"));
+
+        let mut webp = b"RIFF\0\0\0\0WEBP".to_vec();
+        webp.extend_from_slice(b"VP8 ");
+        assert_eq!(resolve_image_type(None, &webp), Some("image/webp"));
+
+        let mut heic = vec![0, 0, 0, 0x18];
+        heic.extend_from_slice(b"ftypheic");
+        assert_eq!(resolve_image_type(None, &heic), Some("image/heic"));
+    }
+
+    #[test]
+    fn image_type_rejects_non_images() {
+        // 防盗链页面、JSON 错误体都不能被当成图片放行。
+        assert_eq!(
+            resolve_image_type(Some("text/html"), b"<html>403</html>"),
+            None
+        );
+        assert_eq!(
+            resolve_image_type(Some("application/json"), b"{\"code\":1}"),
+            None
+        );
+        assert_eq!(resolve_image_type(None, b""), None);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! ClipKeep 网页版网关。
 //!
 //! 三件事：把 `/api/*` 透传给 DTK（注入 Key）、托管 Flutter web 静态产物、
-//! 提供 `/dl` 让浏览器自己把视频拿下去。不含用户体系、不落盘、不转码。
+//! 提供 `/dl` 让浏览器自己把视频拿下去、`/img` 给网页端中转封面与头像。
+//! 不含用户体系、不落盘、不转码。
 
 pub mod auth;
 pub mod bundle;
@@ -75,6 +76,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/bundle", post(bundle::bundle))
         .route("/api/bundle/{token}", get(bundle::bundle_download))
         .route("/dl", get(media::download))
+        .route("/img", get(media::image))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_session,
